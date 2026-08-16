@@ -177,18 +177,22 @@ window.__ModuleLoader__.load({
 				};
 			}, [load]);
 
-			// 滑杆轨道填充：值变化时重绘「已填充」渐变（自定义 track/thumb 见 ui 样式表）
-			react.useEffect(() => {
+			// 滑杆轨道填充：重绘「已填充」渐变（自定义 track/thumb 见 ui 样式表）。
+			// percent 为 0..100 的整数值。
+			const paintRange = (percent) => {
 				const el = rangeRef.current;
 				if (el === null) return;
-				const percent = Math.round((typeof state.opacity === "number" ? state.opacity : 0.6) * 100);
 				el.style.background = "linear-gradient(to right, var(--dsw-alias-state-business-primary) 0%, var(--dsw-alias-state-business-primary) " + percent + "%, var(--dsw-alias-border-l2) " + percent + "%, var(--dsw-alias-border-l2) 100%)";
+			};
+			react.useEffect(() => {
+				paintRange(Math.round((typeof state.opacity === "number" ? state.opacity : 0.6) * 100));
 			}, [state.opacity]);
 
 			/** 不透明度 / 契合度变化：本地即时生效 + 防抖持久化。 */
 			const schedulePersist = (next) => {
 				setState((prev) => ({ ...prev, opacity: next.opacity, fit: next.fit }));
 				applyWallpaper({ present: true, image: state.image, opacity: next.opacity, fit: next.fit });
+				paintRange(Math.round(next.opacity * 100));
 				if (persistTimer.current !== null) window.clearTimeout(persistTimer.current);
 				persistTimer.current = window.setTimeout(() => {
 					Promise.resolve().then(() => update({ opacity: next.opacity, fit: next.fit })).then(applyWallpaper).catch(() => {});
@@ -233,7 +237,8 @@ window.__ModuleLoader__.load({
 			};
 
 			const doOpacity = (event) => {
-				schedulePersist({ ...state, opacity: Number(event.currentTarget.value) });
+				// 滑杆 value 是 0..100 百分比，state.opacity 是 0..1 小数
+				schedulePersist({ ...state, opacity: Number(event.currentTarget.value) / 100 });
 			};
 
 			const doFit = (event) => {
