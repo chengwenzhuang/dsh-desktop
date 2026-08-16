@@ -252,7 +252,7 @@ window.__ModuleLoader__.load({
 			const doUpdate = async () => { setBusy(true); try { await update(); } catch (e) { setState((p) => ({ ...p, error: e instanceof Error ? e.message : String(e) })); setBusy(false); } };
 			// 点「立即更新」先弹出与新版本弹窗一致的确认对话框（含 Release 说明）
 			const onUpdateClick = () => showUpdateDialog(null, state, t, doUpdate);
-			const card = { border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-layer-3)", borderRadius: "10px", padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px", maxWidth: "760px" };
+			const card = { marginTop: "14px", border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-layer-3)", borderRadius: "10px", padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px", maxWidth: "760px" };
 			const row = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" };
 			const meta = { color: "var(--dsw-alias-label-tertiary)", fontSize: "12px", lineHeight: "18px" };
 			const btn = { height: "32px", padding: "0 14px", borderRadius: "8px", fontSize: "13px", fontWeight: "500", cursor: "pointer", fontFamily: "inherit", border: "1px solid var(--dsw-alias-border-l2)", background: "transparent", color: "var(--dsw-alias-label-primary)" };

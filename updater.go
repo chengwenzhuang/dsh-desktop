@@ -21,7 +21,7 @@ import (
 
 // appVersion is the current desktop version. It must match the
 // winres.json file_version and the GitHub release tag (v<version>).
-const appVersion = "1.0.0"
+const appVersion = "1.0.2"
 
 // updaterRepo is the GitHub repository holding the releases
 // (OWNER/REPO). Publish: tag the commit v<version> and attach the DSH.exe

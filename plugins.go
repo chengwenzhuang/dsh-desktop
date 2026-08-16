@@ -27,6 +27,7 @@ var bundledPlugins = []bundledPluginDef{
 	{dir: "bundled-plugins/dsh-local-plugins", id: "local-plugin-manager", name: "dsh-local-plugins"},
 	{dir: "bundled-plugins/dsh-session-delete", id: "session-delete", name: "dsh-session-delete"},
 	{dir: "bundled-plugins/dsh-updater", id: "updater", name: "dsh-updater"},
+	{dir: "bundled-plugins/dsh-wallpaper", id: "wallpaper", name: "dsh-wallpaper"},
 }
 
 // dshDataHome resolves the DeepSeek Harness home ($DSH_HOME, else ~/.dsh),

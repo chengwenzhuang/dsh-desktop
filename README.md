@@ -98,6 +98,7 @@ EXE 启动时（`server.go` → `ensureBundledPlugins`）会把 `bundled-plugins
 | `dsh-local-plugins` | `local-plugin-manager` | **本地插件管理**：「设置 → 插件」新增「本地插件」标签页——输入/浏览插件目录即可安装（校验后复制到 `<profile>/node_modules/<name>` 并在 `cordis.patch.yml` 追加 managed insert 行），也可列出并一键移除已安装插件；内置（`@deepseek-ai/*`）插件与本管理器自身受保护 |
 | `dsh-session-delete` | `session-delete` | **会话删除**：侧边栏会话「⋮」菜单新增「删除会话」——确认后停止（如运行中）→ 落盘日志 → 立即归档（行马上从侧边栏/搜索消失）→ 日志移入 `<DSH_HOME>/trash/<日期>/<会话id>/` 回收站；同时负责对 `dsh-client-ui-workspace` 已发布 bundle 打菜单补丁（锚点不匹配自动跳过） |
 | `dsh-updater` | `updater` | **软件更新中继**：桌面端（`updater.go`）负责真实的 GitHub 版本检查 / 下载 / 替换 / 重启；本插件 `status()` 读取桌面端写入的 `%LOCALAPPDATA%/DSH/update/state.json` 显示当前/最新版本，`check()` / `apply()` 向 `request.json` 写请求由桌面端轮询消费，UI 在「设置」中展示 |
+| `dsh-wallpaper` | `wallpaper` | **背景壁纸**：「设置 → 通用」的「背景壁纸」卡片——上传图片作为应用背景，可调不透明度与契合度（铺满/完整显示/拉伸），一键恢复默认；壁纸与设置在 `<DSH_HOME>/wallpaper/` 持久化，渲染为 `z-index:-1` 全屏固定层并把布局基色令牌 `--dsw-alias-bg-base` 覆盖为透明 |
 
 ### 新增插件工作流
 

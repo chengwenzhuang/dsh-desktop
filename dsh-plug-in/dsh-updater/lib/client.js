@@ -37,6 +37,7 @@ window.__ModuleLoader__.load({
 			"updating": "正在更新，应用即将重启…",
 			"dialogTitle": "发现新版本",
 			"dialogBody": "发现新版本 v{latest}（当前 v{current}）。是否立即更新？更新完成后将自动重启 DSH。",
+			"releaseNotes": "更新内容",
 			"noPrompt": "本版本不再提示",
 			"cancel": "取消",
 			"close": "关闭",
@@ -63,6 +64,7 @@ window.__ModuleLoader__.load({
 			"updating": "Updating — the app will restart…",
 			"dialogTitle": "New version available",
 			"dialogBody": "Version v{latest} is available (current v{current}). Update now? DSH will restart automatically afterwards.",
+			"releaseNotes": "Release notes",
 			"noPrompt": "Don't ask again for this version",
 			"cancel": "Cancel",
 			"close": "Close",
@@ -93,9 +95,12 @@ window.__ModuleLoader__.load({
 		// ── 全局自动弹窗（每次打开 DSH 检测到新版本时） ──
 		const DISMISS_KEY = "dsh-updater-dismissed";
 		let dialog = null;
+		// 弹窗内进度轮询所需的 RPC 上下文（apply() 时赋值；卡片路径弹窗 ctx 为 null）
+		let serviceCtx = null;
 		function closeDialog() {
 			if (dialog !== null) {
 				if (dialog._onKey) window.removeEventListener("keydown", dialog._onKey);
+				if (dialog._progressTimer) { window.clearInterval(dialog._progressTimer); dialog._progressTimer = null; }
 				dialog.remove();
 			}
 			dialog = null;
@@ -105,6 +110,55 @@ window.__ModuleLoader__.load({
 		}
 		function dismiss(latestVersion) {
 			try { window.localStorage.setItem(DISMISS_KEY, latestVersion); } catch {}
+		}
+
+		// 更新进行中：在弹窗卡片下方渲染进度条 + 百分比，并轮询 updater/status
+		// 刷新进度；ready / error 时停止轮询。定时器挂在 overlay 上，弹窗关闭时
+		// closeDialog 负责清理。
+		function startUpdateProgress(card, overlay, body, t) {
+			if (overlay._progressTimer) return;
+			const wrap = document.createElement("div");
+			wrap.style.cssText = "display:flex;flex-direction:column;gap:6px";
+			const text = document.createElement("div");
+			text.style.cssText = "font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary, #666)";
+			text.textContent = "0%";
+			const track = document.createElement("div");
+			track.style.cssText = "height:6px;border-radius:3px;background:var(--dsw-alias-bg-layer-1, #ececec);overflow:hidden";
+			const bar = document.createElement("div");
+			bar.style.cssText = "height:100%;width:0%;border-radius:3px;background:var(--dsw-alias-state-business-primary, #2563eb);transition:width .3s ease";
+			track.appendChild(bar);
+			wrap.append(text, track);
+			card.appendChild(wrap);
+			const setProgress = (pct, done) => {
+				const p = Math.max(0, Math.min(100, Math.round(pct || 0)));
+				bar.style.width = p + "%";
+				text.textContent = p + "%";
+				if (done && overlay._progressTimer) {
+					window.clearInterval(overlay._progressTimer);
+					overlay._progressTimer = null;
+				}
+			};
+			overlay._progressTimer = window.setInterval(() => {
+				Promise.resolve().then(() => rpcCall(serviceCtx, "updater/status")).then(
+					(s) => {
+						if (!s) return;
+						if (s.status === "downloading") {
+							setProgress(s.progress, false);
+						} else if (s.status === "ready") {
+							body.textContent = t("status.ready");
+							setProgress(100, true);
+						} else if (s.status === "error") {
+							body.textContent = t("status.error") + "：" + (s.error || "");
+							bar.style.background = "var(--dsw-alias-state-error-primary, #dc2626)";
+							setProgress(s.progress, true);
+						} else {
+							// apply 请求尚未被桌面端消费（仍 available/idle），维持当前进度
+							setProgress(s.progress, false);
+						}
+					},
+					() => { /* 瞬时失败下一轮再试 */ }
+				);
+			}, 500);
 		}
 
 		function showUpdateDialog(ctx, state, t, onUpdate) {
@@ -125,6 +179,16 @@ window.__ModuleLoader__.load({
 			const body = document.createElement("div");
 			body.style.cssText = "margin:0;font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary, #333)";
 			body.textContent = t("dialogBody", { latest: state.latestVersion, current: state.currentVersion || "-" });
+			let notesLabel = null;
+			let notesBox = null;
+			if (state.latestNotes) {
+				notesLabel = document.createElement("div");
+				notesLabel.style.cssText = "margin:0;font-size:12px;line-height:18px;font-weight:600;color:var(--dsw-alias-label-secondary, #666)";
+				notesLabel.textContent = t("releaseNotes");
+				notesBox = document.createElement("div");
+				notesBox.style.cssText = "margin:0;max-height:170px;overflow-y:auto;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.12));border-radius:8px;background:var(--dsw-alias-bg-layer-1, #fafafa);font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary, #555);white-space:pre-wrap;word-break:break-word;box-sizing:border-box";
+				notesBox.textContent = state.latestNotes;
+			}
 			const noPrompt = document.createElement("label");
 			noPrompt.style.cssText = "display:flex;align-items:center;gap:8px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary, #666);cursor:pointer";
 			const checkbox = document.createElement("input");
@@ -149,13 +213,19 @@ window.__ModuleLoader__.load({
 			const updateBtn = mkBtn(t("update"), true);
 			updateBtn.addEventListener("click", () => {
 				if (checkbox.checked && state.latestVersion) dismiss(state.latestVersion);
-				body.textContent = t("updating");
-				footer.removeChild(updateBtn);
-				footer.removeChild(cancelBtn);
+				// 进入更新流程：隐藏「本版本不再提示」与两个操作按钮，下方显示下载进度
+				noPrompt.style.display = "none";
+				body.textContent = t("status.downloading");
+				card.removeChild(footer);
+				startUpdateProgress(card, overlay, body, t);
 				onUpdate();
 			});
 			footer.append(cancelBtn, updateBtn);
-			card.append(title, body, noPrompt, footer);
+			const parts = [title];
+			parts.push(body);
+			if (notesLabel && notesBox) parts.push(notesLabel, notesBox);
+			parts.push(noPrompt, footer);
+			card.append(...parts);
 			overlay.appendChild(card);
 			document.body.appendChild(overlay);
 			dialog = overlay;
@@ -180,13 +250,15 @@ window.__ModuleLoader__.load({
 			react.useEffect(() => { load(); const timer = window.setInterval(load, 5000); return () => window.clearInterval(timer); }, [load]);
 			const doCheck = async () => { setBusy(true); try { await check(); window.setTimeout(load, 1500); } catch (e) { setState((p) => ({ ...p, error: e instanceof Error ? e.message : String(e) })); } finally { setBusy(false); } };
 			const doUpdate = async () => { setBusy(true); try { await update(); } catch (e) { setState((p) => ({ ...p, error: e instanceof Error ? e.message : String(e) })); setBusy(false); } };
-			const card = { border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-layer-3)", borderRadius: "10px", padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px", maxWidth: "760px" };
+			// 点「立即更新」先弹出与新版本弹窗一致的确认对话框（含 Release 说明）
+			const onUpdateClick = () => showUpdateDialog(null, state, t, doUpdate);
+			const card = { marginTop: "14px", border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-layer-3)", borderRadius: "10px", padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px", maxWidth: "760px" };
 			const row = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" };
 			const meta = { color: "var(--dsw-alias-label-tertiary)", fontSize: "12px", lineHeight: "18px" };
 			const btn = { height: "32px", padding: "0 14px", borderRadius: "8px", fontSize: "13px", fontWeight: "500", cursor: "pointer", fontFamily: "inherit", border: "1px solid var(--dsw-alias-border-l2)", background: "transparent", color: "var(--dsw-alias-label-primary)" };
 			const primary = { ...btn, border: "1px solid var(--dsw-alias-state-business-primary)", background: "color-mix(in srgb, var(--dsw-alias-state-business-primary) 12%, transparent)", color: "var(--dsw-alias-state-business-primary)" };
 			const errorStyle = { color: "var(--dsw-alias-state-error-primary)", fontSize: "13px", lineHeight: "20px" };
-			const statusLine = state.loading ? t("loading") : state.status === "unconfigured" && !state.present ? t("status.noUpdater") : statusLabel(state.status, t) + (state.error ? "：" + state.error : "");
+			const statusLine = state.loading ? t("loading") : state.status === "unconfigured" && !state.present ? t("status.noUpdater") : statusLabel(state.status, t) + (state.status === "downloading" && typeof state.progress === "number" ? " " + Math.round(state.progress) + "%" : "") + (state.error ? "：" + state.error : "");
 			return react.createElement("div", { style: card },
 				react.createElement("div", { style: { fontSize: "14px", fontWeight: "600", lineHeight: "20px", color: "var(--dsw-alias-label-primary)" } }, t("cardTitle")),
 				react.createElement("div", { style: { ...meta, margin: "0" } }, t("cardDescription")),
@@ -197,7 +269,7 @@ window.__ModuleLoader__.load({
 				),
 					react.createElement("div", { style: { display: "flex", gap: "8px", flex: "none" } },
 						react.createElement("button", { type: "button", style: btn, onClick: doCheck, disabled: busy }, busy ? t("checking") : t("check")),
-						state.status === "available" ? react.createElement("button", { type: "button", style: primary, onClick: doUpdate, disabled: busy }, t("update")) : null
+						state.status === "available" ? react.createElement("button", { type: "button", style: primary, onClick: onUpdateClick, disabled: busy }, t("update")) : null
 				)
 			),
 			state.status === "error" ? react.createElement("p", { role: "alert", style: errorStyle }, statusLine) : react.createElement("p", { style: { ...meta, margin: "0" } }, statusLine)
@@ -210,6 +282,7 @@ window.__ModuleLoader__.load({
 		function apply(ctx) {
 			ctx.effect(() => ctx.locale.register(NS, { zh, en }), "ui-updater: dictionaries");
 			const t = ctx.locale.bind(NS);
+			serviceCtx = ctx;
 			const injected = () => ({
 				status: () => rpcCall(ctx, "updater/status"),
 				check: () => rpcCall(ctx, "updater/check"),

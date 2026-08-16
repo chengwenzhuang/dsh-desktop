@@ -1,0 +1,26 @@
+{
+  "name": "dsh-wallpaper",
+  "version": "0.1.0",
+  "description": "Background wallpaper: upload an image as the app background, tune transparency and fit (cover / contain / stretch), or restore the default background.",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-api-remotes"
+      ]
+    }
+  }
+}
