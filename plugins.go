@@ -104,10 +104,13 @@ func patchUIWorkspace(installRoot string) {
 		"\t\t\t\t{\n\t\t\t\t\tid: \"archive\",\n\t\t\t\t\tlabel: t(\"menu.archiveSession\"),\n\t\t\t\t\ticon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconArchiveOutline20, { size: 16 })\n\t\t\t\t}\n\t\t\t];",
 		"\t\t\t\t{\n\t\t\t\t\tid: \"archive\",\n\t\t\t\t\tlabel: t(\"menu.archiveSession\"),\n\t\t\t\t\ticon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconArchiveOutline20, { size: 16 })\n\t\t\t\t},\n\t\t\t\t...(window.__DSH_SESSION_DELETE__ === true ? [{\n\t\t\t\t\tid: \"delete\",\n\t\t\t\t\tlabel: t(\"menu.deleteSession\"),\n\t\t\t\t\ticon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconTrashOutline16, {})\n\t\t\t\t}] : [])\n\t\t\t];") || changed
 
-	// 2) onSelect: dispatch the delete request event
+	// 2) onSelect: dispatch the delete request event.
+	// NOTE: the replacement must end with the original `},` — dropping the
+	// comma (as older exes did) produces an invalid bundle that fails to load
+	// ("client-modules: bundle ... loaded without registering").
 	changed = applyStringPatch(&content,
 		"\t\t\t\t\t\t\t\t\tif (id === \"archive\") onArchive(node.id);\n\t\t\t\t\t\t\t\t},",
-		"\t\t\t\t\t\t\t\t\tif (id === \"archive\") onArchive(node.id);\n\t\t\t\t\t\t\t\t\tif (id === \"delete\") {\n\t\t\t\t\t\t\t\t\t\twindow.dispatchEvent(new CustomEvent(\"dsh:session-delete\", { detail: { sessionId: node.id, title: row.title } }));\n\t\t\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\t\t}") || changed
+		"\t\t\t\t\t\t\t\t\tif (id === \"archive\") onArchive(node.id);\n\t\t\t\t\t\t\t\t\tif (id === \"delete\") {\n\t\t\t\t\t\t\t\t\t\twindow.dispatchEvent(new CustomEvent(\"dsh:session-delete\", { detail: { sessionId: node.id, title: row.title } }));\n\t\t\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\t\t},") || changed
 
 	// 3) zh dictionary key
 	changed = applyStringPatch(&content,
@@ -118,6 +121,14 @@ func patchUIWorkspace(installRoot string) {
 	changed = applyStringPatch(&content,
 		"\"menu.archiveSession\": \"Archive session\",",
 		"\"menu.archiveSession\": \"Archive session\",\n\t\t\t\"menu.deleteSession\": \"Delete session\",") || changed
+
+	// 5) heal bundles corrupted by older exes' patch #2: they dropped the
+	// comma after the onSelect close ("}\n\t\t\t\t\t\t\t\tportal: true,"),
+	// which is a syntax error. The corruption is deterministic, so a targeted
+	// replace restores the exact known-good form. Non-fatal when absent.
+	changed = applyStringPatch(&content,
+		"\t\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\t\tportal: true,",
+		"\t\t\t\t\t\t\t\t},\n\t\t\t\t\t\t\t\tportal: true,") || changed
 
 	if changed {
 		if err := os.WriteFile(clientPath, []byte(content), 0o644); err != nil {
@@ -161,6 +172,34 @@ func readPluginDigest(dir string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+// stripEmptyArrayMarker removes the profile template's `[]` empty-array marker
+// once the patch layer carries real entries. dsh seeds cordis.patch.yml with a
+// lone `[]` document; js-yaml (dsh-app-boot's parsePatchList) rejects a stream
+// with a second root node, so appending insert blocks after `[]` fails boot
+// with "end of the stream or a document separator is expected" and the desktop
+// reports 服务启动失败. `[]` is kept only while it is the file's sole content.
+func stripEmptyArrayMarker(patch string) string {
+	hasEntries := false
+	for _, line := range strings.Split(patch, "\n") {
+		switch trimmed := strings.TrimSpace(line); {
+		case trimmed == "", strings.HasPrefix(trimmed, "#"), trimmed == "[]":
+		default:
+			hasEntries = true
+		}
+	}
+	if !hasEntries {
+		return patch
+	}
+	kept := make([]string, 0, strings.Count(patch, "\n")+1)
+	for _, line := range strings.Split(patch, "\n") {
+		if strings.TrimSpace(line) == "[]" {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
 }
 
 // ensureBundledPlugins installs the shipped plugins into the web profile
@@ -220,6 +259,10 @@ func ensureBundledPlugins(bin string) {
 		patch = []byte(strings.TrimRight(string(patch), "\n") + block)
 		log.Printf("bundled-plugins: registered %s in %s", p.name, patchPath)
 	}
+	// A file that ends up carrying entries must not keep the template's `[]`
+	// line (js-yaml would reject the second root node). Runs unconditionally,
+	// so profiles already broken by older exes are healed on the next start.
+	patch = []byte(stripEmptyArrayMarker(string(patch)))
 	if err := os.WriteFile(patchPath, patch, 0o644); err != nil {
 		log.Printf("bundled-plugins: writing %s failed: %v", patchPath, err)
 		return

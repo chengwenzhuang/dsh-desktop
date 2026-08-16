@@ -64,6 +64,10 @@ $raw = if (Test-Path $patchFile) { Get-Content $patchFile -Raw } else { "" }
 if ($raw -match "dsh-session-delete") {
     Write-Host "[2/3] already registered in cordis.patch.yml"
 } else {
+    # dsh 的 profile 模板用 `[]` 作为空 patch 层标记；它之后若再有内容，
+    # js-yaml 会把整份文件判为非法（第二个文档根）导致启动失败，先移除它。
+    $raw = (($raw -split "`r?`n") | Where-Object { $_.Trim() -ne "[]" }) -join [Environment]::NewLine
+    if ($raw.Trim() -ne "") { $raw = $raw.TrimEnd() + [Environment]::NewLine }
     $block = @(
         "",
         "# ── dsh-session-delete: 会话 ⋮ 菜单删除 ────────────────────────────────",

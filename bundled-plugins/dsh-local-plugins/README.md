@@ -50,6 +50,8 @@ Copy-Item -Recurse -Force "G:\dsh-plug-in\dsh-local-plugins" "$env:USERPROFILE\.
 #   - insert:
 #       - id: local-plugin-manager
 #         name: 'dsh-local-plugins'
+# 注意：若文件里还有 dsh 模板的空数组标记 `[]`，先删掉那一行再追加（`[]` 之后
+# 再有内容会被 js-yaml 判为第二个文档根，dsh 启动失败）。
 # 重启服务
 ```
 

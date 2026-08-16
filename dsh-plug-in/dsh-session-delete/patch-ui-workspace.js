@@ -81,6 +81,23 @@ const EDITS = [
 const revert = process.argv.includes("--revert");
 let source = readFileSync(clientPath, "utf8");
 let changed = 0;
+
+// Heal bundles corrupted by older DSH.exe builds (plugins.go): their patch #2
+// dropped the comma after the onSelect close, leaving a syntax error that
+// fails to load ("client-modules: bundle ... loaded without registering").
+// The corruption is deterministic; repair it non-fatally when present.
+if (!revert) {
+	const broken = `								}
+								portal: true,`;
+	const healed = `								},
+								portal: true,`;
+	if (source.includes(broken) && !source.includes(healed)) {
+		source = source.replace(broken, healed);
+		changed++;
+		console.log("patch-ui-workspace: healed comma dropped by an older exe's patch");
+	}
+}
+
 for (const edit of EDITS) {
 	if (!revert) {
 		if (source.includes(edit.new)) continue; // already applied

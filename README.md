@@ -114,6 +114,13 @@ EXE 启动时（`server.go` → `ensureBundledPlugins`）会把 `bundled-plugins
    `- insert: - id: <id> name: '<插件名>'`，然后托盘「重启服务」生效。
    此后改代码只需改源工程一处，重启服务即可验证；日志见
    `%LOCALAPPDATA%\DSH\logs\server-*.log`。
+
+> ⚠️ **`cordis.patch.yml` 的 `[]` 标记**：dsh 用 `[]` 初始化这个文件（空 patch 层）。
+> 文件里一旦有真实条目，`[]` 行必须删掉——`[]` 之后再追加内容会被 js-yaml 判为
+> 第二个文档根，dsh 启动即报 `failed to parse overlay ... end of the stream or a
+> document separator is expected`（桌面版表现为「服务启动失败 / 卡在安装组件窗口」）。
+> 内置注册（`plugins.go`）与 `dsh-local-plugins` 的安装/移除都会自动处理该标记；
+> 手工编辑时留意即可。
 3. **验证**：按插件功能走一遍使用路径，确认无误。
 4. **放发布副本**：确认可发布后，**手动**把插件目录放入 `bundled-plugins/<插件名>/`。
    （源工程与发布副本之间**没有自动同步**，副本由维护者手动放置、手动更新。）

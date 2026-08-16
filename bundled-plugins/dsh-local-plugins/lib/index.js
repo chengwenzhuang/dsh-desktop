@@ -119,6 +119,16 @@ function unquote(value) {
 	return v;
 }
 
+/** 判断 patch 文本是否已包含真实条目（忽略注释、空行与模板 `[]` 标记）。 */
+function patchHasEntries(text) {
+	for (const line of text.split("\n")) {
+		const t = line.trim();
+		if (t === "" || t.startsWith("#") || t === "[]") continue;
+		return true;
+	}
+	return false;
+}
+
 /** 从 patch 文本中删除指定 id（或 name）的行；空块连同上方注释一起删除。 */
 function removeRowFromPatch(text, targetId) {
 	const lines = text.split("\n");
@@ -248,9 +258,12 @@ class LocalPluginManagerService extends TypertRemoteService {
 			filter: (candidate) => !candidate.split(/[\\/]/).includes(".git")
 		});
 
-		// 追加 managed 块
+		// 追加 managed 块。若文件里还留着 dsh 模板的空数组标记 `[]` 必须先删掉：
+		// 追加条目后 `[]` 与条目并存的流会被 js-yaml 判为第二个文档根，
+		// dsh-app-boot 的 parsePatchList 即报错，服务启动失败。
+		const clean = patchText.split("\n").filter((line) => line.trim() !== "[]").join("\n");
 		const block = "\n# ── managed by dsh-local-plugins ──────────────────────────────────────────\n- insert:\n    - id: " + packageName + "\n      name: '" + packageName + "'\n";
-		await writeFile(patchFile, patchText.replace(/\s+$/, "") + block, "utf8");
+		await writeFile(patchFile, clean.replace(/\s+$/, "") + block, "utf8");
 
 		return {
 			installed: true,
@@ -304,7 +317,11 @@ class LocalPluginManagerService extends TypertRemoteService {
 		const text = await readFile(patchFile, "utf8").catch(() => "");
 		const outcome = removeRowFromPatch(text, target);
 		if (!outcome.removed) throw new Error("在 cordis.patch.yml 中找不到插件行：" + target);
-		await writeFile(patchFile, outcome.text, "utf8");
+		let after = outcome.text;
+		// 全部条目被移除后补回模板空数组标记：纯注释文件会被 parsePatchList
+		// 判为非数组（null）同样导致启动失败，`[]` 才是合法的空 patch 层。
+		if (!patchHasEntries(after)) after = after.replace(/\s+$/, "") + "\n[]\n";
+		await writeFile(patchFile, after, "utf8");
 		const moduleDir = join(profileDir, "node_modules", outcome.name);
 		await rm(moduleDir, { recursive: true, force: true }).catch(() => {});
 		return {
