@@ -89,6 +89,25 @@ func TestEnsureBundledPlugins(t *testing.T) {
 		t.Fatalf("ui-workspace patch not idempotent")
 	}
 
+	// 内嵌插件版本更新（.dsh-digest 摘要不匹配）时应重装插件
+	updaterDir := filepath.Join(home, "profiles", "web", "node_modules", "dsh-updater")
+	marker := filepath.Join(updaterDir, ".dsh-digest")
+	if err := os.WriteFile(marker, []byte("stale-digest"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ensureBundledPlugins(bin)
+	refreshed, err := os.ReadFile(marker)
+	if err != nil || string(refreshed) == "stale-digest" {
+		t.Fatalf("plugin not reinstalled on digest mismatch")
+	}
+	clientData, err := os.ReadFile(filepath.Join(updaterDir, "lib", "client.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(clientData), "dsh-updater") {
+		t.Fatalf("reinstalled client.js looks wrong")
+	}
+
 	patch2 := "# header\n[]\n- insert:\n    - id: my-plugin\n      name: 'my-plugin'\n"
 	if err := os.WriteFile(filepath.Join(home, "profiles", "web", "cordis.patch.yml"), []byte(patch2), 0o644); err != nil {
 		t.Fatal(err)

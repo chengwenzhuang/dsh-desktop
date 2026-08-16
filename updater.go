@@ -30,6 +30,8 @@ var updaterRepo = "chengwenzhuang/dsh-desktop"
 type UpdateState struct {
 	CurrentVersion string `json:"currentVersion"`
 	LatestVersion  string `json:"latestVersion"`
+	LatestTitle    string `json:"latestTitle"`
+	LatestNotes    string `json:"latestNotes"`
 	LatestURL      string `json:"latestUrl"`
 	AssetSize      int64  `json:"assetSize"`
 	PublishedAt    string `json:"publishedAt"`
@@ -38,6 +40,7 @@ type UpdateState struct {
 	Request        string `json:"request"` // "" | "check" | "apply"
 	LastCheckedAt  string `json:"lastCheckedAt"`
 	Downloaded     bool   `json:"downloaded"`
+	Progress       int    `json:"progress"` // 0-100，status==downloading 时由下载进度上报
 }
 
 var (
@@ -97,8 +100,53 @@ func setUpdateStatus(status, message string) {
 	state.Status = status
 	state.Error = message
 	state.Downloaded = status == "ready"
+	switch status {
+	case "ready":
+		state.Progress = 100
+	case "downloading":
+		// 下载进度由 progressReader 周期写入，这里保持现值
+	default:
+		state.Progress = 0
+	}
 	stateMu.Unlock()
 	saveUpdateState()
+}
+
+// progressFlushInterval 是下载进度写盘的最小间隔，避免高频 io 拖慢下载。
+const progressFlushInterval = 250 * time.Millisecond
+
+// progressReader 包装下载响应体，边读边把百分比写入共享状态文件。
+type progressReader struct {
+	src       io.Reader
+	total     int64
+	done      int64
+	lastFlush time.Time
+}
+
+func (r *progressReader) Read(p []byte) (int, error) {
+	n, err := r.src.Read(p)
+	if n > 0 {
+		r.done += int64(n)
+	}
+	if n > 0 && (err != nil || time.Since(r.lastFlush) >= progressFlushInterval) {
+		r.flush()
+	}
+	return n, err
+}
+
+func (r *progressReader) flush() {
+	pct := 0
+	if r.total > 0 {
+		pct = int(r.done * 100 / r.total)
+		if pct > 100 {
+			pct = 100
+		}
+	}
+	stateMu.Lock()
+	state.Progress = pct
+	stateMu.Unlock()
+	saveUpdateState()
+	r.lastFlush = time.Now()
 }
 
 // parseVersion splits "v1.2.3" into [1,2,3].
@@ -182,6 +230,8 @@ func checkForUpdates() {
 
 	var rel struct {
 		TagName     string `json:"tag_name"`
+		Name        string `json:"name"` // Release 标题
+		Body        string `json:"body"` // Release 说明（Markdown 原文）
 		PublishedAt string `json:"published_at"`
 		Assets      []struct {
 			Name string `json:"name"`
@@ -217,6 +267,8 @@ func checkForUpdates() {
 
 	stateMu.Lock()
 	state.LatestVersion = latest
+	state.LatestTitle = rel.Name
+	state.LatestNotes = rel.Body
 	state.LatestURL = assetURL
 	state.AssetSize = assetSize
 	state.PublishedAt = rel.PublishedAt
@@ -229,6 +281,58 @@ func checkForUpdates() {
 		setUpdateStatus("up-to-date", "")
 		log.Printf("updater: up to date (%s)", appVersion)
 	}
+}
+
+// downloadUpdate downloads the asset at url into dest, streaming download
+// progress into the shared state while status == "downloading", then validates
+// the downloaded size against the release asset size. All state transitions
+// (downloading / error) are written here; on success the caller moves to ready.
+func downloadUpdate(url string, assetSize int64, dest string) error {
+	setUpdateStatus("downloading", "")
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		setUpdateStatus("error", "构造下载请求失败: "+err.Error())
+		return err
+	}
+	req.Header.Set("User-Agent", "DSH-Desktop/"+appVersion)
+	client := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		setUpdateStatus("error", "下载失败: "+err.Error())
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		err := fmt.Errorf("HTTP %s", resp.Status)
+		setUpdateStatus("error", "下载失败: "+err.Error())
+		return err
+	}
+	out, err := os.Create(dest)
+	if err != nil {
+		setUpdateStatus("error", "无法创建更新文件: "+err.Error())
+		return err
+	}
+	total := assetSize
+	if total <= 0 {
+		total = resp.ContentLength
+	}
+	pr := &progressReader{src: resp.Body, total: total, lastFlush: time.Now()}
+	_, copyErr := io.Copy(out, pr)
+	closeErr := out.Close()
+	if copyErr != nil || closeErr != nil {
+		os.Remove(dest)
+		setUpdateStatus("error", "下载写入失败")
+		return fmt.Errorf("copy/close failed: %v / %v", copyErr, closeErr)
+	}
+	if assetSize > 0 {
+		if fi, err := os.Stat(dest); err == nil && fi.Size() != assetSize {
+			os.Remove(dest)
+			msg := fmt.Sprintf("下载校验失败（期望 %d 字节，实际 %d）", assetSize, fi.Size())
+			setUpdateStatus("error", msg)
+			return fmt.Errorf("size mismatch: got %d want %d", fi.Size(), assetSize)
+		}
+	}
+	return nil
 }
 
 // applyUpdate downloads the new exe, spawns a detached helper that swaps it
@@ -250,48 +354,26 @@ func (a *App) applyUpdate() {
 	}
 	exeDir := filepath.Dir(exe)
 	newExe := filepath.Join(exeDir, "DSH.exe.new")
-	oldExe := filepath.Join(exeDir, "DSH.exe.old")
+	os.Remove(newExe) // 清理上次失败的残留
+	os.Remove(filepath.Join(exeDir, "DSH.exe.old"))
 
-	setUpdateStatus("downloading", "")
-	req, _ := http.NewRequest("GET", latestURL, nil)
-	req.Header.Set("User-Agent", "DSH-Desktop/"+appVersion)
-	client := &http.Client{Timeout: 10 * time.Minute}
-	resp, err := client.Do(req)
-	if err != nil {
-		setUpdateStatus("error", "下载失败: "+err.Error())
+	if err := downloadUpdate(latestURL, assetSize, newExe); err != nil {
+		log.Printf("updater: download failed: %v", err)
 		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		setUpdateStatus("error", "下载失败: HTTP "+resp.Status)
-		return
-	}
-	out, err := os.Create(newExe)
-	if err != nil {
-		setUpdateStatus("error", "无法创建更新文件: "+err.Error())
-		return
-	}
-	_, copyErr := io.Copy(out, resp.Body)
-	closeErr := out.Close()
-	if copyErr != nil || closeErr != nil {
-		os.Remove(newExe)
-		setUpdateStatus("error", "下载写入失败")
-		return
-	}
-	if assetSize > 0 {
-		if fi, err := os.Stat(newExe); err == nil && fi.Size() != assetSize {
-			os.Remove(newExe)
-			setUpdateStatus("error", fmt.Sprintf("下载校验失败（期望 %d 字节，实际 %d）", assetSize, fi.Size()))
-			return
-		}
 	}
 
 	setUpdateStatus("ready", "")
 	log.Printf("updater: downloaded %s -> %s", latestURL, newExe)
 
-	// 分离助手：等 2 秒（本进程完全退出）→ 换名 → 重新拉起。
-	script := fmt.Sprintf(`timeout /t 2 /nobreak >nul & move /y "%s" "%s" & move /y "%s" "%s" & del /q "%s" & start "" "%s"`, exe, oldExe, newExe, exe, oldExe, exe)
-	if err := exec.Command("cmd", "/c", "start", "/b", "", "cmd", "/c", script).Start(); err != nil {
+	// 分离的 PowerShell 助手：旧进程退出后 exe 文件才解锁，这里用重试循环
+	// 等到可替换 → 替换 → 重新拉起。不用 cmd 的 timeout（无控制台环境会因
+	// 输入重定向立即失败，导致在旧进程仍占用 exe 时执行替换而失败）。
+	ps := fmt.Sprintf(
+		`$exe = '%s'; $new = '%s'; for ($i = 0; $i -lt 60; $i++) { try { Move-Item -LiteralPath $new -Destination $exe -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 1000 } }; if (Test-Path -LiteralPath $exe) { Start-Process -FilePath $exe }`,
+		strings.ReplaceAll(exe, "'", "''"),
+		strings.ReplaceAll(newExe, "'", "''"),
+	)
+	if err := exec.Command("powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps).Start(); err != nil {
 		setUpdateStatus("error", "无法启动更新助手: "+err.Error())
 		return
 	}

@@ -1,4 +1,6 @@
 # 构建产物（build.ps1 / mkzip 生成，不提交）
+DSH.exe
+DSH-full.exe
 runtime.zip
 
 # 运行时源目录：node_modules 产物，体积巨大，不提交。

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"io/fs"
 	"log"
 	"os"
@@ -127,13 +129,47 @@ func patchUIWorkspace(installRoot string) {
 	}
 }
 
+// pluginDigest computes a stable digest over one embedded plugin directory so
+// the installed copy can be refreshed when the exe ships a newer plugin
+// version. fs.WalkDir visits entries in lexical order, so the digest is
+// deterministic across runs/builds.
+func pluginDigest(fsys fs.FS, dir string) string {
+	h := sha256.New()
+	fs.WalkDir(fsys, dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		data, err := fs.ReadFile(fsys, p)
+		if err != nil {
+			return err
+		}
+		h.Write([]byte(strings.TrimPrefix(p, dir)))
+		h.Write(data)
+		return nil
+	})
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// readPluginDigest returns the digest recorded in <dir>/.dsh-digest, or "".
+func readPluginDigest(dir string) string {
+	data, err := os.ReadFile(filepath.Join(dir, ".dsh-digest"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
 // ensureBundledPlugins installs the shipped plugins into the web profile
 // before the server boots: copies each plugin into
 // <home>/profiles/web/node_modules/<name>, registers its loader row in
 // cordis.patch.yml, and applies the ui-workspace menu patch needed by the
-// delete plugin. Idempotent — existing copies/rows/patches are never
-// touched, and an already-initialized profile is left intact (the profile
-// template only writes missing files). Failures are logged and non-fatal.
+// delete plugin. A plugin is (re)installed when it is missing or when its
+// .dsh-digest marker no longer matches the embedded content (i.e. the exe
+// ships a newer plugin version) — otherwise existing copies/rows/patches are
+// left untouched. Idempotent; failures are logged and non-fatal.
 func ensureBundledPlugins(bin string) {
 	profileDir := filepath.Join(dshDataHome(), "profiles", "web")
 	nmDir := filepath.Join(profileDir, "node_modules")
@@ -142,15 +178,23 @@ func ensureBundledPlugins(bin string) {
 		return
 	}
 
-	// 1) copy each bundled plugin if missing
+	// 1) install each bundled plugin if missing or outdated
 	for _, p := range bundledPlugins {
 		target := filepath.Join(nmDir, p.name)
-		if fileExists(filepath.Join(target, "package.json")) {
+		digest := pluginDigest(bundledPluginsFS, p.dir)
+		if fileExists(filepath.Join(target, "package.json")) && readPluginDigest(target) == digest {
+			continue // 已是最新
+		}
+		if err := os.RemoveAll(target); err != nil {
+			log.Printf("bundled-plugins: removing %s failed: %v", target, err)
 			continue
 		}
 		if err := copyEmbeddedDir(bundledPluginsFS, p.dir, target); err != nil {
 			log.Printf("bundled-plugins: copying %s failed: %v", p.name, err)
 			continue
+		}
+		if err := os.WriteFile(filepath.Join(target, ".dsh-digest"), []byte(digest), 0o644); err != nil {
+			log.Printf("bundled-plugins: writing digest for %s failed: %v", p.name, err)
 		}
 		log.Printf("bundled-plugins: installed %s -> %s", p.name, target)
 	}

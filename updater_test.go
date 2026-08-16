@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestVersionLess(t *testing.T) {
@@ -33,7 +37,7 @@ func TestCheckForUpdates(t *testing.T) {
 	state = UpdateState{CurrentVersion: appVersion, Status: "idle"}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"tag_name":"v1.2.0","published_at":"2026-01-01T00:00:00Z","assets":[{"name":"DSH.exe","browser_download_url":"http://x/DSH.exe","size":123}]}`))
+		w.Write([]byte(`{"tag_name":"v1.2.0","name":"DSH Desktop v1.2.0","body":"- 新增 Release 标题与说明展示\n- 修复若干问题","published_at":"2026-01-01T00:00:00Z","assets":[{"name":"DSH.exe","browser_download_url":"http://x/DSH.exe","size":123}]}`))
 	}))
 	defer srv.Close()
 
@@ -47,6 +51,12 @@ func TestCheckForUpdates(t *testing.T) {
 	}
 	if state.LatestVersion != "1.2.0" {
 		t.Fatalf("latest = %s", state.LatestVersion)
+	}
+	if state.LatestTitle != "DSH Desktop v1.2.0" {
+		t.Fatalf("title = %q", state.LatestTitle)
+	}
+	if !strings.Contains(state.LatestNotes, "Release 标题") {
+		t.Fatalf("notes = %q, want release notes body", state.LatestNotes)
 	}
 	if state.LatestURL != "http://x/DSH.exe" {
 		t.Fatalf("url = %s", state.LatestURL)
@@ -85,5 +95,108 @@ func TestCheckForUpdates(t *testing.T) {
 	checkForUpdates()
 	if state.Status != "unconfigured" {
 		t.Fatalf("status = %s, want unconfigured", state.Status)
+	}
+}
+
+// chunkReader returns at most chunk bytes per Read (progress throttling relies
+// on multiple small reads).
+type chunkReader struct {
+	data  []byte
+	pos   int
+	chunk int
+}
+
+func (c *chunkReader) Read(p []byte) (int, error) {
+	if c.pos >= len(c.data) {
+		return 0, io.EOF
+	}
+	n := len(c.data) - c.pos
+	if n > c.chunk {
+		n = c.chunk
+	}
+	if n > len(p) {
+		n = len(p)
+	}
+	copy(p, c.data[c.pos:c.pos+n])
+	c.pos += n
+	return n, nil
+}
+
+// TestProgressReader verifies progressReader writes intermediate and final
+// percentages into the shared state.
+func TestProgressReader(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	statePath = filepath.Join(updateStateDir(), "state.json")
+	state = UpdateState{CurrentVersion: appVersion, Status: "downloading"}
+
+	payload := bytes.Repeat([]byte("x"), 1000)
+	cr := &chunkReader{data: payload, chunk: 250}
+	pr := &progressReader{src: cr, total: 1000, lastFlush: time.Now()}
+	buf := make([]byte, 4096)
+
+	// 把 lastFlush 拨回过去，确保每次 Read 都会触发写盘（节流条件满足）。
+	readAndCheck := func(want int) {
+		pr.lastFlush = time.Now().Add(-time.Second)
+		if _, err := pr.Read(buf); err != nil && err != io.EOF {
+			t.Fatalf("read: %v", err)
+		}
+		stateMu.Lock()
+		got := state.Progress
+		stateMu.Unlock()
+		if got != want {
+			t.Fatalf("progress after %d bytes = %d, want %d", pr.done, got, want)
+		}
+	}
+
+	readAndCheck(25) // 250/1000
+	readAndCheck(50) // 500/1000
+	readAndCheck(75) // 750/1000
+	readAndCheck(100)
+}
+
+// TestDownloadProgress runs downloadUpdate end-to-end against a local server:
+// status must move to downloading, progress to 100, and the file must land
+// with the expected size. A wrong asset size must fail and remove the file.
+func TestDownloadProgress(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	statePath = filepath.Join(updateStateDir(), "state.json")
+	state = UpdateState{CurrentVersion: appVersion, Status: "idle"}
+	saveUpdateState()
+
+	payload := bytes.Repeat([]byte("x"), 1024*64)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprint(len(payload)))
+		w.Write(payload)
+	}))
+	defer srv.Close()
+
+	dest := filepath.Join(t.TempDir(), "DSH.exe.new")
+	if err := downloadUpdate(srv.URL, int64(len(payload)), dest); err != nil {
+		t.Fatalf("downloadUpdate: %v", err)
+	}
+	if state.Status != "downloading" {
+		t.Fatalf("status = %s, want downloading (ready is set by applyUpdate)", state.Status)
+	}
+	if state.Progress != 100 {
+		t.Fatalf("progress = %d, want 100", state.Progress)
+	}
+	if fi, err := os.Stat(dest); err != nil || fi.Size() != int64(len(payload)) {
+		t.Fatalf("downloaded file size = %v (err %v), want %d", fi, err, len(payload))
+	}
+
+	// 大小校验失败：声明的大小与实际不符 → error，残留文件被删除。
+	dest2 := filepath.Join(t.TempDir(), "DSH.exe.new")
+	err := downloadUpdate(srv.URL, int64(len(payload))+1, dest2)
+	if err == nil {
+		t.Fatalf("size mismatch should fail")
+	}
+	if state.Status != "error" {
+		t.Fatalf("status = %s, want error after size mismatch", state.Status)
+	}
+	if !strings.Contains(state.Error, "校验失败") {
+		t.Fatalf("error = %q, want size-check message", state.Error)
+	}
+	if _, statErr := os.Stat(dest2); !os.IsNotExist(statErr) {
+		t.Fatalf("stale file should be removed after failed download")
 	}
 }
