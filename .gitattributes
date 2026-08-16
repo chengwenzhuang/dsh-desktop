@@ -1,0 +1,2 @@
+# pack.bat 依赖 CRLF 换行（cmd 解析批处理需要），任何机器检出时强制 CRLF
+pack.bat text eol=crlf

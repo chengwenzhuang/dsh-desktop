@@ -35,6 +35,7 @@ func TestCheckForUpdates(t *testing.T) {
 	t.Setenv("DSH_UPDATE_REPO", "dummy/repo")
 	statePath = filepath.Join(updateStateDir(), "state.json")
 	state = UpdateState{CurrentVersion: appVersion, Status: "idle"}
+	updaterTransport = http.DefaultTransport // 测试直连 httptest，不受本机系统代理影响
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"tag_name":"v1.2.0","name":"DSH Desktop v1.2.0","body":"- 新增 Release 标题与说明展示\n- 修复若干问题","published_at":"2026-01-01T00:00:00Z","assets":[{"name":"DSH.exe","browser_download_url":"http://x/DSH.exe","size":123}]}`))
@@ -162,6 +163,7 @@ func TestDownloadProgress(t *testing.T) {
 	statePath = filepath.Join(updateStateDir(), "state.json")
 	state = UpdateState{CurrentVersion: appVersion, Status: "idle"}
 	saveUpdateState()
+	updaterTransport = http.DefaultTransport // 测试直连 httptest，不受本机系统代理影响
 
 	payload := bytes.Repeat([]byte("x"), 1024*64)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -198,5 +200,111 @@ func TestDownloadProgress(t *testing.T) {
 	}
 	if _, statErr := os.Stat(dest2); !os.IsNotExist(statErr) {
 		t.Fatalf("stale file should be removed after failed download")
+	}
+}
+
+func TestProxyParsing(t *testing.T) {
+	cases := []struct{ server, scheme, want string }{
+		{"127.0.0.1:10809", "https", "127.0.0.1:10809"},
+		{"127.0.0.1:10809", "http", "127.0.0.1:10809"},
+		{"http=127.0.0.1:10808;https=127.0.0.1:10809", "https", "127.0.0.1:10809"},
+		{"http=127.0.0.1:10808;https=127.0.0.1:10809", "http", "127.0.0.1:10808"},
+		{"http=127.0.0.1:10808", "https", ""},
+		{"", "https", ""},
+	}
+	for _, c := range cases {
+		if got := proxyForHost(c.server, c.scheme); got != c.want {
+			t.Errorf("proxyForHost(%q, %q) = %q, want %q", c.server, c.scheme, got, c.want)
+		}
+	}
+}
+
+func TestBypassHost(t *testing.T) {
+	bypass := []string{"localhost", "127.*", "10.*", "*.example.com", "<local>", "api.github.com"}
+	cases := []struct{ host string; want bool }{
+		{"127.0.0.1", true},
+		{"localhost", true},
+		{"10.1.2.3", true},
+		{"sub.example.com", true},
+		{"api.github.com", true},
+		{"intranet-host", true}, // <local>：无点主机
+		{"github.com", false},
+		{"objects.githubusercontent.com", false},
+	}
+	for _, c := range cases {
+		if got := bypassHost(bypass, c.host); got != c.want {
+			t.Errorf("bypassHost(%q) = %v, want %v", c.host, got, c.want)
+		}
+	}
+}
+
+// TestGetWithRetry verifies transient 5xx failures are retried and a
+// permanently failing endpoint eventually reports an error.
+func TestGetWithRetry(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	client := &http.Client{}
+	resp, err := getWithRetry(client, srv.URL, http.Header{"X-Test": {"1"}})
+	if err != nil {
+		t.Fatalf("getWithRetry: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || attempts != 3 {
+		t.Fatalf("resp=%d attempts=%d, want 200/3", resp.StatusCode, attempts)
+	}
+	if got := resp.Header.Get("X-Test"); got != "" {
+		t.Fatalf("server should not echo request header back, got %q", got)
+	}
+
+	always := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer always.Close()
+	if _, err := getWithRetry(client, always.URL, nil); err == nil {
+		t.Fatalf("expected error after retries exhausted")
+	}
+}
+
+// TestDownloadMirrorEnv verifies DSH_UPDATE_MIRROR prefixes the download URL.
+func TestDownloadMirrorEnv(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	statePath = filepath.Join(updateStateDir(), "state.json")
+	state = UpdateState{CurrentVersion: appVersion, Status: "idle"}
+	saveUpdateState()
+	updaterTransport = http.DefaultTransport
+
+	got := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case got <- r.URL.RequestURI():
+		default:
+		}
+		w.Header().Set("Content-Length", "2")
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	t.Setenv("DSH_UPDATE_MIRROR", srv.URL)
+	dest := filepath.Join(t.TempDir(), "DSH.exe.new")
+	githubURL := "https://github.com/owner/repo/releases/download/v1.0.2/DSH.exe"
+	if err := downloadUpdate(githubURL, 0, dest); err != nil {
+		t.Fatalf("downloadUpdate with mirror: %v", err)
+	}
+	select {
+	case uri := <-got:
+		if uri != "/"+githubURL {
+			t.Fatalf("mirror URI = %q, want %q", uri, "/"+githubURL)
+		}
+	default:
+		t.Fatalf("mirror server got no request")
 	}
 }

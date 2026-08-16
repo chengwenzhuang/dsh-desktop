@@ -5,7 +5,9 @@ import (
 	"log"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,11 +15,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/windows/registry"
 )
 
 // appVersion is the current desktop version. It must match the
 // winres.json file_version and the GitHub release tag (v<version>).
-const appVersion = "1.0.1"
+const appVersion = "1.0.0"
 
 // updaterRepo is the GitHub repository holding the releases
 // (OWNER/REPO). Publish: tag the commit v<version> and attach the DSH.exe
@@ -104,7 +108,7 @@ func setUpdateStatus(status, message string) {
 	case "ready":
 		state.Progress = 100
 	case "downloading":
-		// 下载进度由 progressReader 周期写入，这里保持现值
+		state.Progress = 0 // 新一轮下载从头计数，之后由 progressReader 写入
 	default:
 		state.Progress = 0
 	}
@@ -113,7 +117,7 @@ func setUpdateStatus(status, message string) {
 }
 
 // progressFlushInterval 是下载进度写盘的最小间隔，避免高频 io 拖慢下载。
-const progressFlushInterval = 250 * time.Millisecond
+const progressFlushInterval = 100 * time.Millisecond
 
 // progressReader 包装下载响应体，边读边把百分比写入共享状态文件。
 type progressReader struct {
@@ -147,6 +151,170 @@ func (r *progressReader) flush() {
 	stateMu.Unlock()
 	saveUpdateState()
 	r.lastFlush = time.Now()
+}
+
+// ── 网络访问：Windows 系统代理 + 重试 ──────────────────────────────────
+//
+// Go 的 http.ProxyFromEnvironment 只认 HTTP(S)_PROXY 环境变量，而 Windows
+// 上这些变量通常为空——系统代理（WinINET，如 clash/v2ray 的 127.0.0.1:10809）
+// 不会被读取，导致更新器绕过代理直连 GitHub，在国内网络下慢或连接被重置。
+// 这里读取注册表里的系统代理，探活通过后用于更新请求；不通则退回直连，
+// 不会比现状更差。环境变量代理优先级最高。
+
+// winProxy 保存 Windows 系统（WinINET）代理设置。
+type winProxy struct {
+	enabled bool
+	server  string // ProxyServer："host:port" 或 "http=a;https=b" 形式
+	bypass  []string
+}
+
+// readWinProxy 从注册表读取当前用户的 Internet Settings 代理配置。
+func readWinProxy() winProxy {
+	const keyPath = `Software\Microsoft\Windows\CurrentVersion\Internet Settings`
+	k, err := registry.OpenKey(registry.CURRENT_USER, keyPath, registry.QUERY_VALUE)
+	if err != nil {
+		return winProxy{}
+	}
+	defer k.Close()
+	enable, _, _ := k.GetIntegerValue("ProxyEnable")
+	server, _, err := k.GetStringValue("ProxyServer")
+	if err != nil || server == "" {
+		return winProxy{}
+	}
+	override, _, _ := k.GetStringValue("ProxyOverride")
+	var bypass []string
+	for _, s := range strings.Split(override, ";") {
+		if s = strings.TrimSpace(s); s != "" {
+			bypass = append(bypass, s)
+		}
+	}
+	return winProxy{enabled: enable != 0, server: server, bypass: bypass}
+}
+
+// proxyForHost 从 WinINET ProxyServer 串中取出某协议的代理地址
+// （"host:port" 全局形式，或 "http=a;https=b" 按协议形式）。
+func proxyForHost(server, scheme string) string {
+	if strings.Contains(server, "=") {
+		for _, part := range strings.Split(server, ";") {
+			kv := strings.SplitN(part, "=", 2)
+			if len(kv) == 2 && strings.EqualFold(strings.TrimSpace(kv[0]), scheme) {
+				return strings.TrimSpace(kv[1])
+			}
+		}
+		return "" // 该协议未配置代理
+	}
+	return strings.TrimSpace(server)
+}
+
+// bypassHost 判断主机是否命中 ProxyOverride 绕过列表
+// （<local> 内网、*.域后缀、127.* 等 IP 通配前缀、精确主机）。
+func bypassHost(bypass []string, host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" || host == "localhost" {
+		return true
+	}
+	for _, e := range bypass {
+		e = strings.ToLower(strings.TrimSpace(e))
+		switch {
+		case e == "":
+		case e == "<local>":
+			if !strings.Contains(host, ".") {
+				return true
+			}
+		case strings.HasPrefix(e, "*."):
+			if strings.HasSuffix(host, e[1:]) {
+				return true
+			}
+		case strings.HasSuffix(e, "*"):
+			if strings.HasPrefix(host, strings.TrimSuffix(e, "*")) {
+				return true
+			}
+		case e == host:
+			return true
+		}
+	}
+	return false
+}
+
+// envHasProxy 报告环境变量代理是否已设置（优先级高于系统代理）。
+func envHasProxy() bool {
+	for _, name := range []string{"HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"} {
+		if strings.TrimSpace(os.Getenv(name)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// updaterTransport 是所有更新网络请求共享的 RoundTripper。
+var updaterTransport http.RoundTripper = buildUpdaterTransport()
+
+func buildUpdaterTransport() http.RoundTripper {
+	base := &http.Transport{Proxy: http.ProxyFromEnvironment}
+	if envHasProxy() {
+		return base // 环境变量代理（如 CI/命令行设置）优先
+	}
+	sys := readWinProxy()
+	if !sys.enabled || sys.server == "" {
+		return base
+	}
+	addr := proxyForHost(sys.server, "https")
+	if addr == "" {
+		addr = proxyForHost(sys.server, "http")
+	}
+	if addr == "" || !strings.Contains(addr, ":") {
+		return base
+	}
+	// 探活：代理端口可连才启用，否则退回直连（不引入新的失败路径）。
+	conn, err := net.DialTimeout("tcp", addr, 400*time.Millisecond)
+	if err != nil {
+		log.Printf("updater: system proxy %s unreachable, using direct connection", addr)
+		return base
+	}
+	conn.Close()
+	log.Printf("updater: using system proxy %s for update checks/downloads", addr)
+	base.Proxy = func(req *http.Request) (*url.URL, error) {
+		if req.URL == nil || bypassHost(sys.bypass, req.URL.Hostname()) {
+			return nil, nil
+		}
+		if p := proxyForHost(sys.server, req.URL.Scheme); p != "" {
+			return url.Parse("http://" + p)
+		}
+		return nil, nil
+	}
+	return base
+}
+
+// getWithRetry 发起 GET 并附带请求头，网络错误或 HTTP 5xx/429 时最多重试
+// 3 次（短退避）——连接被重置往往是瞬时的，重试即可恢复。
+func getWithRetry(client *http.Client, url string, header http.Header) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 700 * time.Millisecond)
+		}
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, err
+		}
+		for k, vs := range header {
+			for _, v := range vs {
+				req.Header.Add(k, v)
+			}
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("HTTP %s", resp.Status)
+			continue
+		}
+		return resp, nil
+	}
+	return nil, lastErr
 }
 
 // parseVersion splits "v1.2.3" into [1,2,3].
@@ -205,15 +373,11 @@ func checkForUpdates() {
 	}
 
 	url := strings.TrimRight(githubLatestURL, "/") + "/" + repo + "/releases/latest"
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		setUpdateStatus("error", "构造请求失败: "+err.Error())
-		return
-	}
-	req.Header.Set("User-Agent", "DSH-Desktop/"+appVersion)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	client := &http.Client{Transport: updaterTransport, Timeout: 15 * time.Second}
+	resp, err := getWithRetry(client, url, http.Header{
+		"User-Agent": {"DSH-Desktop/" + appVersion},
+		"Accept":     {"application/vnd.github+json"},
+	})
 	if err != nil {
 		setUpdateStatus("error", "网络请求失败: "+err.Error())
 		return
@@ -289,14 +453,13 @@ func checkForUpdates() {
 // (downloading / error) are written here; on success the caller moves to ready.
 func downloadUpdate(url string, assetSize int64, dest string) error {
 	setUpdateStatus("downloading", "")
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		setUpdateStatus("error", "构造下载请求失败: "+err.Error())
-		return err
+	// 可选下载镜像：DSH_UPDATE_MIRROR 前缀（如 https://ghproxy.net/），
+	// 直连 GitHub 慢或被重置时可用镜像加速。
+	if m := strings.TrimSpace(os.Getenv("DSH_UPDATE_MIRROR")); m != "" {
+		url = strings.TrimRight(m, "/") + "/" + url
 	}
-	req.Header.Set("User-Agent", "DSH-Desktop/"+appVersion)
-	client := &http.Client{Timeout: 10 * time.Minute}
-	resp, err := client.Do(req)
+	client := &http.Client{Transport: updaterTransport, Timeout: 10 * time.Minute}
+	resp, err := getWithRetry(client, url, http.Header{"User-Agent": {"DSH-Desktop/" + appVersion}})
 	if err != nil {
 		setUpdateStatus("error", "下载失败: "+err.Error())
 		return err
@@ -390,7 +553,7 @@ func (a *App) applyUpdate() {
 func (a *App) updaterPollLoop() {
 	reqPath := filepath.Join(updateStateDir(), "request.json")
 	for {
-		time.Sleep(2 * time.Second)
+		time.Sleep(1 * time.Second) // 1s 轮询，点「立即更新」后更快开始下载
 		data, err := os.ReadFile(reqPath)
 		if err != nil {
 			continue

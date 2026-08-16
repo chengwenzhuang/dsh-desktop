@@ -158,7 +158,7 @@ window.__ModuleLoader__.load({
 					},
 					() => { /* 瞬时失败下一轮再试 */ }
 				);
-			}, 1000);
+			}, 500);
 		}
 
 		function showUpdateDialog(ctx, state, t, onUpdate) {
@@ -176,9 +176,6 @@ window.__ModuleLoader__.load({
 			const title = document.createElement("div");
 			title.style.cssText = "margin:0;font-size:16px;line-height:24px;font-weight:600;color:var(--dsw-alias-label-primary, #222)";
 			title.textContent = t("dialogTitle");
-			const relTitle = document.createElement("div");
-			relTitle.style.cssText = "margin:0;font-size:15px;line-height:22px;font-weight:600;color:var(--dsw-alias-state-business-primary, #2563eb)";
-			relTitle.textContent = state.latestTitle || "";
 			const body = document.createElement("div");
 			body.style.cssText = "margin:0;font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary, #333)";
 			body.textContent = t("dialogBody", { latest: state.latestVersion, current: state.currentVersion || "-" });
@@ -225,7 +222,6 @@ window.__ModuleLoader__.load({
 			});
 			footer.append(cancelBtn, updateBtn);
 			const parts = [title];
-			if (state.latestTitle) parts.push(relTitle);
 			parts.push(body);
 			if (notesLabel && notesBox) parts.push(notesLabel, notesBox);
 			parts.push(noPrompt, footer);
@@ -254,7 +250,7 @@ window.__ModuleLoader__.load({
 			react.useEffect(() => { load(); const timer = window.setInterval(load, 5000); return () => window.clearInterval(timer); }, [load]);
 			const doCheck = async () => { setBusy(true); try { await check(); window.setTimeout(load, 1500); } catch (e) { setState((p) => ({ ...p, error: e instanceof Error ? e.message : String(e) })); } finally { setBusy(false); } };
 			const doUpdate = async () => { setBusy(true); try { await update(); } catch (e) { setState((p) => ({ ...p, error: e instanceof Error ? e.message : String(e) })); setBusy(false); } };
-			// 点「立即更新」先弹出与新版本弹窗一致的确认对话框（含 Release 标题/说明）
+			// 点「立即更新」先弹出与新版本弹窗一致的确认对话框（含 Release 说明）
 			const onUpdateClick = () => showUpdateDialog(null, state, t, doUpdate);
 			const card = { border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-layer-3)", borderRadius: "10px", padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px", maxWidth: "760px" };
 			const row = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" };

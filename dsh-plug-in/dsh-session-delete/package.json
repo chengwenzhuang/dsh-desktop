@@ -1,0 +1,26 @@
+{
+  "name": "dsh-session-delete",
+  "version": "0.1.0",
+  "description": "Delete a conversation from the session-row context menu (three-dot menu) in the DSH Web sidebar. Moves the session log to the Harness trash directory and removes it from the sidebar immediately.",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-api-remotes"
+      ]
+    }
+  }
+}
