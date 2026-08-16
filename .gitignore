@@ -1,0 +1,13 @@
+# 构建产物（build.ps1 / mkzip 生成，不提交）
+DSH.exe
+DSH-full.exe
+runtime.zip
+
+# 运行时源目录：node_modules 产物，体积巨大，不提交。
+# 需要打包完整版时按 README「重新构建」一节重新生成。
+third_party/dsh-runtime/
+
+# 本地杂项
+*.log
+Thumbs.db
+.DS_Store

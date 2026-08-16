@@ -1,0 +1,27 @@
+{
+  "name": "dsh-updater",
+  "version": "0.1.0",
+  "description": "软件更新：检测 GitHub 发布版本、显示当前版本、触发下载更新并重启 DSH（配合桌面端 updater）",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-settings-general"
+      ]
+    }
+  }
+}
